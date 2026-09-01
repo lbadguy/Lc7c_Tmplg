@@ -7,6 +7,8 @@ function pixels(width, height) {
 }
 
 test('decoder exceptions do not break the scan flow', async () => {
+  // jsQR throws a TypeError when it cannot locate a finder pattern, so
+  // swallowing it is a hard requirement, not defensive padding.
   const attempts = [];
   const result = await decodeImageData(pixels(600, 600), {
     decoder: (_data, _width, _height, options) => {
@@ -15,8 +17,7 @@ test('decoder exceptions do not break the scan flow', async () => {
     }
   });
   assert.equal(result, null);
-  // Throwing is a miss, not a fatal error: both inversion passes still run.
-  assert.deepEqual(attempts, ['dontInvert', 'onlyInvert']);
+  assert.deepEqual(attempts, ['attemptBoth']);
 });
 
 test('gates decoding on the pixel budget, not the original image size', () => {
@@ -46,27 +47,26 @@ test('skips main-thread decoding for oversized input', async () => {
   assert.equal(result, null);
 });
 
-test('tries plain decoding before inversion', async () => {
-  const attempts = [];
-  const result = await decodeImageData(pixels(600, 600), {
-    decoder: (_data, _width, _height, options) => {
-      attempts.push(options?.inversionAttempts);
-      return options?.inversionAttempts === 'onlyInvert' ? { data: 'light-on-dark' } : null;
-    }
-  });
-  assert.equal(result?.text, 'light-on-dark');
-  assert.deepEqual(attempts, ['dontInvert', 'onlyInvert']);
-});
-
-test('does not pay for inversion when the first pass succeeds', async () => {
+test('asks jsQR to cover both polarities in one pass', async () => {
+  // 'onlyInvert' throws on inverted input in this jsQR build, so a split
+  // dontInvert/onlyInvert pair would silently drop light-on-dark support.
   const attempts = [];
   await decodeImageData(pixels(600, 600), {
     decoder: (_data, _width, _height, options) => {
       attempts.push(options?.inversionAttempts);
-      return { data: 'https://example.com/fast' };
+      return { data: 'https://example.com/either-polarity' };
     }
   });
-  assert.deepEqual(attempts, ['dontInvert']);
+  assert.deepEqual(attempts, ['attemptBoth']);
+});
+
+test('stops at the first hit without redundant passes', async () => {
+  let calls = 0;
+  const result = await decodeImageData(pixels(600, 600), {
+    decoder: () => { calls++; return { data: 'https://example.com/fast' }; }
+  });
+  assert.equal(result?.url, 'https://example.com/fast');
+  assert.equal(calls, 1);
 });
 
 test('prefers the native detector and skips jsQR on a hit', async () => {

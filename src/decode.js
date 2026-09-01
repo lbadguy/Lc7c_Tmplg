@@ -86,13 +86,16 @@ function imageDataToCanvas(imageData) {
  * stopping at the first hit and respecting the caller's time budget.
  *
  * 1. native BarcodeDetector - different algorithm, usually fastest
- * 2. jsQR, as-is
- * 3. jsQR, upscaled - rescues codes too small for reliable binarization
- * 4. jsQR, inverted - rescues light-on-dark codes
+ * 2. jsQR with 'attemptBoth' - covers dark-on-light and light-on-dark
+ * 3. jsQR upscaled - rescues codes too small for reliable binarization
  *
- * Inversion is a separate step rather than jsQR's 'attemptBoth' because that
- * option doubles the cost of every scan (813ms -> 1.9s at 1920x1080) to serve
- * an uncommon case. Running 'dontInvert' first keeps the common path fast.
+ * 'attemptBoth' rather than a cheap 'dontInvert' pass followed by
+ * 'onlyInvert': measured on this jsQR build, 'onlyInvert' throws on inverted
+ * input instead of decoding it, so splitting the passes silently drops
+ * light-on-dark support. The feared cost does not materialize either - on a
+ * code that decodes, 'attemptBoth' returns on the first pass (~10ms at
+ * 400x400, same as 'dontInvert'). Only unlocatable input pays for two passes,
+ * and that case is already bounded by the pixel gate and the time budget.
  */
 export async function decodeImageData(imageData, {
   signal,
@@ -114,9 +117,8 @@ export async function decodeImageData(imageData, {
   throwIfAborted(signal);
   if (budgetLeft() <= 0) return null;
 
-  const withinGate = canUseMainThreadDecoder(imageData);
-  if (withinGate) {
-    const direct = runJsQR(decoder, imageData, 'dontInvert');
+  if (canUseMainThreadDecoder(imageData)) {
+    const direct = runJsQR(decoder, imageData, 'attemptBoth');
     if (direct) return direct;
   }
 
@@ -127,17 +129,9 @@ export async function decodeImageData(imageData, {
   if (factor > 1) {
     const enlarged = upscaleImageData(imageData, factor, canvasFactory);
     if (enlarged && canUseMainThreadDecoder(enlarged)) {
-      const scaled = runJsQR(decoder, enlarged, 'dontInvert');
+      const scaled = runJsQR(decoder, enlarged, 'attemptBoth');
       if (scaled) return scaled;
     }
-  }
-
-  throwIfAborted(signal);
-  if (budgetLeft() <= 0) return null;
-
-  if (withinGate) {
-    const inverted = runJsQR(decoder, imageData, 'onlyInvert');
-    if (inverted) return inverted;
   }
 
   return null;
