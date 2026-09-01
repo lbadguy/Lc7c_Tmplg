@@ -1,6 +1,6 @@
 import { hasArea } from './selection.js';
 import { intersectRects } from './geometry.js';
-import { cropRectForElement, upscaleFactor } from './scale.js';
+import { cropRectForElement } from './scale.js';
 
 const MAX_MEDIA_CANDIDATES = 8;
 const MAX_RASTER_SIDE = 2048;
@@ -26,15 +26,33 @@ function rasterSize(width, height) {
   };
 }
 
-function drawSource(source, width, height) {
-  const size = rasterSize(width, height);
+/**
+ * Rasterize a source into ImageData, optionally cropping to `crop` in the
+ * source's own pixel coordinates.
+ *
+ * The downscale cap only applies to uncropped input, where it guards memory on
+ * huge images. A crop is already selection-sized, and shrinking it would undo
+ * the resolution the crop just bought us.
+ */
+function drawSource(source, width, height, crop = null) {
+  const sourceWidth = crop ? crop.sw : width;
+  const sourceHeight = crop ? crop.sh : height;
+  const size = crop
+    ? { width: Math.max(1, Math.round(sourceWidth)), height: Math.max(1, Math.round(sourceHeight)) }
+    : rasterSize(width, height);
   const canvas = document.createElement('canvas');
   canvas.width = size.width;
   canvas.height = size.height;
   const context = canvas.getContext('2d', { willReadFrequently: true });
   if (!context) throw new Error('无法创建图片画布。');
-  context.drawImage(source, 0, 0, size.width, size.height);
+  if (crop) context.drawImage(source, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, size.width, size.height);
+  else context.drawImage(source, 0, 0, size.width, size.height);
   return readCanvas(canvas);
+}
+
+function objectFitOf(element) {
+  if (typeof getComputedStyle !== 'function') return 'fill';
+  return getComputedStyle(element).objectFit || 'fill';
 }
 
 function gmRequestBlob(url, signal) {
@@ -72,36 +90,56 @@ function loadBlobImage(blob) {
   });
 }
 
-async function captureImage(image, signal) {
+async function captureImage(image, rect, signal) {
   throwIfAborted(signal);
   const width = image.naturalWidth || image.width;
   const height = image.naturalHeight || image.height;
   if (!width || !height) return null;
+  const bounds = image.getBoundingClientRect();
+  const crop = cropRectForElement(rect, bounds, { width, height }, objectFitOf(image));
   try {
-    return drawSource(image, width, height);
+    return drawSource(image, width, height, crop);
   } catch {
+    // Tainted canvas: refetch the original bytes through Tampermonkey. The
+    // refetched image carries natural dimensions, so the crop derived from the
+    // on-page layout still maps correctly as long as the size matches.
     const sourceUrl = image.currentSrc || image.src;
     if (!sourceUrl) return null;
     const blob = await gmRequestBlob(sourceUrl, signal);
     const fetchedImage = await loadBlobImage(blob);
-    return drawSource(fetchedImage, fetchedImage.naturalWidth, fetchedImage.naturalHeight);
+    const fetchedWidth = fetchedImage.naturalWidth;
+    const fetchedHeight = fetchedImage.naturalHeight;
+    const fetchedCrop = cropRectForElement(rect, bounds, { width: fetchedWidth, height: fetchedHeight }, objectFitOf(image));
+    return drawSource(fetchedImage, fetchedWidth, fetchedHeight, fetchedCrop);
   }
 }
 
-async function captureSvg(svg, signal) {
+async function captureSvg(svg, rect, signal) {
   throwIfAborted(signal);
   const bounds = svg.getBoundingClientRect();
   if (!hasArea({ width: bounds.width, height: bounds.height }, 1)) return null;
   const source = new XMLSerializer().serializeToString(svg);
   const image = await loadBlobImage(new Blob([source], { type: 'image/svg+xml;charset=utf-8' }));
-  return drawSource(image, bounds.width, bounds.height);
+  // Rasterized at layout size, so the element's pixel grid is 1:1 with layout.
+  const crop = cropRectForElement(rect, bounds, { width: bounds.width, height: bounds.height });
+  return drawSource(image, bounds.width, bounds.height, crop);
+}
+
+function captureCanvas(canvas, rect) {
+  const bounds = canvas.getBoundingClientRect();
+  const crop = cropRectForElement(rect, bounds, { width: canvas.width, height: canvas.height });
+  return drawSource(canvas, canvas.width, canvas.height, crop);
 }
 
 function mediaScore(element, bounds, overlap) {
   const squareScore = Math.min(bounds.width, bounds.height) / Math.max(bounds.width, bounds.height);
   const coverage = (overlap.width * overlap.height) / (bounds.width * bounds.height);
   const kindScore = element instanceof HTMLCanvasElement ? 0.2 : element instanceof HTMLImageElement ? 0.1 : 0;
-  return squareScore + coverage + kindScore;
+  // Cheap candidates first: decoding a small region is far faster, so under a
+  // fixed time budget this fits more attempts before giving up.
+  const area = overlap.width * overlap.height;
+  const cheapScore = area > 0 ? Math.min(0.3, 300000 / area * 0.3) : 0;
+  return squareScore + coverage + kindScore + cheapScore;
 }
 
 function collectCandidates(rect) {
@@ -116,27 +154,43 @@ function collectCandidates(rect) {
     .slice(0, MAX_MEDIA_CANDIDATES);
 }
 
-async function captureCandidate(element, signal) {
-  if (element instanceof HTMLImageElement) return captureImage(element, signal);
-  if (element instanceof HTMLCanvasElement) return drawSource(element, element.width, element.height);
-  if (element instanceof SVGElement) return captureSvg(element, signal);
+async function captureCandidate(element, rect, signal) {
+  if (element instanceof HTMLImageElement) return captureImage(element, rect, signal);
+  if (element instanceof HTMLCanvasElement) return captureCanvas(element, rect);
+  if (element instanceof SVGElement) return captureSvg(element, rect, signal);
   return null;
 }
 
-export async function* captureVisiblePage({ rect, signal } = {}) {
+/**
+ * Yield decodable pixel buffers for the selection, cheapest candidate first.
+ *
+ * `stats` is mutated as we go so the caller can tell "found nothing to read"
+ * apart from "read pixels but no code in them" — two failures that need
+ * different messages.
+ */
+export async function* captureVisiblePage({ rect, signal, stats } = {}) {
+  const counters = stats ?? {};
+  counters.candidates = 0;
+  counters.read = 0;
+  counters.failed = 0;
   if (!rect || !hasArea(rect, 1)) throw new Error('请选择一个有内容的区域。');
   throwIfAborted(signal);
   const candidates = collectCandidates(rect);
-  if (!candidates.length) throw new Error('选定区域中没有可读取的图片、Canvas 或 SVG。');
-  let yielded = false;
+  counters.candidates = candidates.length;
+  if (!candidates.length) return;
   for (const { element } of candidates) {
     throwIfAborted(signal);
     try {
-      const imageData = await captureCandidate(element, signal);
-      if (imageData) { yielded = true; yield imageData; }
+      const imageData = await captureCandidate(element, rect, signal);
+      if (imageData) {
+        counters.read += 1;
+        yield imageData;
+      } else {
+        counters.failed += 1;
+      }
     } catch (error) {
       if (error?.name === 'AbortError') throw error;
+      counters.failed += 1;
     }
   }
-  if (!yielded) throw new Error('无法读取选定区域中的图片内容。');
 }

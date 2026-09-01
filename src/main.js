@@ -4,6 +4,10 @@ import { createScannerUI } from './ui.js';
 import { createBase64UI } from './base64.js';
 import { initialState, reduceState } from './state.js';
 
+// Upper bound on one scan's main-thread work. jsQR is synchronous, so without
+// a ceiling a page full of large images could freeze the tab for minutes.
+const SCAN_BUDGET_MS = 2500;
+
 function start() {
   if (!document.body || document.getElementById('qr-scanner-root')) return;
   let state = initialState;
@@ -18,13 +22,22 @@ function start() {
     cancel();
     controller = new AbortController();
     setState({ type: 'scan-start' });
+    const stats = {};
+    const startedAt = Date.now();
+    const remaining = () => SCAN_BUDGET_MS - (Date.now() - startedAt);
     try {
       let result = null;
-      for await (const pixels of captureVisiblePage({ rect, signal: controller.signal })) {
-        result = await decodeImageData(pixels, { signal: controller.signal });
+      let timedOut = false;
+      for await (const pixels of captureVisiblePage({ rect, signal: controller.signal, stats })) {
+        if (remaining() <= 0) { timedOut = true; break; }
+        result = await decodeImageData(pixels, { signal: controller.signal, remainingBudget: remaining() });
         if (result) break;
       }
-      setState(result ? { type: 'scan-success', result } : { type: 'scan-empty' });
+      if (result) setState({ type: 'scan-success', result });
+      else if (timedOut) setState({ type: 'scan-timeout' });
+      else if (!stats.candidates) setState({ type: 'scan-no-media' });
+      else if (!stats.read) setState({ type: 'scan-unreadable' });
+      else setState({ type: 'scan-empty' });
     } catch (error) {
       if (error?.name === 'AbortError') setState({ type: 'scan-cancel' });
       else setState({ type: 'scan-error', message: error?.message || '识别失败，请重试。' });
