@@ -101,14 +101,15 @@ async function captureImage(image, rect, signal) {
     return drawSource(image, width, height, crop);
   } catch {
     // Tainted canvas: refetch the original bytes through Tampermonkey. The
-    // refetched image carries natural dimensions, so the crop derived from the
-    // on-page layout still maps correctly as long as the size matches.
+    // refetched bitmap can differ in size from the on-page one (srcset picked a
+    // different variant, or the server serves a different resolution), so
+    // recompute the crop against what we actually received.
     const sourceUrl = image.currentSrc || image.src;
     if (!sourceUrl) return null;
     const blob = await gmRequestBlob(sourceUrl, signal);
     const fetchedImage = await loadBlobImage(blob);
-    const fetchedWidth = fetchedImage.naturalWidth;
-    const fetchedHeight = fetchedImage.naturalHeight;
+    const fetchedWidth = fetchedImage.naturalWidth || width;
+    const fetchedHeight = fetchedImage.naturalHeight || height;
     const fetchedCrop = cropRectForElement(rect, bounds, { width: fetchedWidth, height: fetchedHeight }, objectFitOf(image));
     return drawSource(fetchedImage, fetchedWidth, fetchedHeight, fetchedCrop);
   }
@@ -120,9 +121,14 @@ async function captureSvg(svg, rect, signal) {
   if (!hasArea({ width: bounds.width, height: bounds.height }, 1)) return null;
   const source = new XMLSerializer().serializeToString(svg);
   const image = await loadBlobImage(new Blob([source], { type: 'image/svg+xml;charset=utf-8' }));
-  // Rasterized at layout size, so the element's pixel grid is 1:1 with layout.
-  const crop = cropRectForElement(rect, bounds, { width: bounds.width, height: bounds.height });
-  return drawSource(image, bounds.width, bounds.height, crop);
+  // A serialized SVG rasterizes at its own intrinsic size, which comes from its
+  // width/height attributes or viewBox - not the CSS box it occupied on the
+  // page. Deriving the crop from layout size would index outside the bitmap and
+  // yield blank pixels, so measure the raster we actually got.
+  const rasterWidth = image.naturalWidth || bounds.width;
+  const rasterHeight = image.naturalHeight || bounds.height;
+  const crop = cropRectForElement(rect, bounds, { width: rasterWidth, height: rasterHeight });
+  return drawSource(image, rasterWidth, rasterHeight, crop);
 }
 
 function captureCanvas(canvas, rect) {

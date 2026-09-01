@@ -81,6 +81,21 @@ test('clamps crop to the natural pixel grid', () => {
   assert.equal(crop.sy + crop.sh <= 400, true);
 });
 
+test('crop follows the raster size, not the layout size', () => {
+  // An SVG with viewBox="0 0 100 100" shown at 400x400, or a refetched image
+  // variant smaller than the one on the page. Using layout size here would
+  // place the source rect outside the bitmap and read blank pixels.
+  const selection = { x: 100, y: 100, width: 200, height: 200 };
+  const bounds = { left: 0, top: 0, width: 400, height: 400 };
+
+  const wrong = cropRectForElement(selection, bounds, { width: 400, height: 400 });
+  assert.deepEqual(wrong, { sx: 100, sy: 100, sw: 200, sh: 200 });
+
+  const right = cropRectForElement(selection, bounds, { width: 100, height: 100 });
+  assert.deepEqual(right, { sx: 25, sy: 25, sw: 50, sh: 50 });
+  assert.ok(right.sx + right.sw <= 100, 'crop must stay inside the actual raster');
+});
+
 test('rejects degenerate element sizes', () => {
   const selection = { x: 0, y: 0, width: 10, height: 10 };
   assert.equal(cropRectForElement(selection, { left: 0, top: 0, width: 0, height: 100 }, { width: 10, height: 10 }), null);
