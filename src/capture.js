@@ -6,8 +6,6 @@ const MAX_MEDIA_CANDIDATES = 8;
 const MAX_RASTER_SIDE = 2048;
 const RESOURCE_TIMEOUT_MS = 4000;
 
-export { intersectRects };
-
 function throwIfAborted(signal) {
   if (signal?.aborted) throw new DOMException('Scan cancelled', 'AbortError');
 }
