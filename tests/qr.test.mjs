@@ -5,35 +5,7 @@ import { classifyUrl } from '../src/url.js';
 import { canUseMainThreadDecoder, decodeImageData } from '../src/decode.js';
 import { intersectRects } from '../src/capture.js';
 import { initialState, reduceState } from '../src/state.js';
-
-function base64Encode(text) {
-  try {
-    const bytes = new TextEncoder().encode(text);
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    return btoa(binary);
-  } catch {
-    throw new Error('编码失败，输入内容无法转换为 Base64。');
-  }
-}
-
-function base64Decode(base64) {
-  try {
-    if (!base64 || typeof base64 !== 'string') throw new Error();
-    const trimmed = base64.trim();
-    if (!trimmed) throw new Error();
-    const binary = atob(trimmed);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
-      bytes[i] = binary.charCodeAt(i);
-    }
-    return new TextDecoder('utf-8').decode(bytes);
-  } catch {
-    throw new Error('解码失败，请检查输入的 Base64 字符串是否有效。');
-  }
-}
+import { base64Encode, base64Decode } from '../src/base64-codec.js';
 
 test('base64 ASCII round-trip', () => {
   const original = 'Hello, World!';
