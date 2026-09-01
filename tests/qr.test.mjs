@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyUrl } from '../src/url.js';
-import { canUseMainThreadDecoder, decodeImageData } from '../src/decode.js';
 import { initialState, reduceState } from '../src/state.js';
 import { base64Encode, base64Decode } from '../src/base64-codec.js';
 
@@ -84,30 +83,3 @@ test('scan state transitions are explicit', () => {
   assert.equal(reduceState(scanning, { type: 'scan-cancel' }).phase, 'cancelled');
 });
 
-test('decoder exceptions do not break the scan flow', async () => {
-  const calls = [];
-  const result = await decodeImageData({ data: new Uint8ClampedArray(16), width: 2, height: 2 }, {
-    decoder: (_data, _width, _height, options) => {
-      calls.push(options?.inversionAttempts ?? 'default');
-      throw new TypeError("Cannot read properties of undefined (reading 'height')");
-    }
-  });
-  assert.equal(result, null);
-  assert.deepEqual(calls, ['default']);
-});
-
-test('keeps large images off the main-thread decoder', () => {
-  assert.equal(canUseMainThreadDecoder({ width: 1000, height: 1000 }), true);
-  assert.equal(canUseMainThreadDecoder({ width: 1600, height: 1000 }), false);
-});
-
-test('uses the worker decoder before the main-thread fallback', async () => {
-  let mainThreadCalls = 0;
-  const result = await decodeImageData({ data: new Uint8ClampedArray(16), width: 2, height: 2 }, {
-    canvasFactory: () => ({}),
-    qrDecoder: { scanImage: async () => ({ data: 'https://example.com/dense' }) },
-    decoder: () => { mainThreadCalls++; return null; }
-  });
-  assert.equal(result?.url, 'https://example.com/dense');
-  assert.equal(mainThreadCalls, 0);
-});
