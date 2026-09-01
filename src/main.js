@@ -4,8 +4,15 @@ import { createScannerUI } from './ui.js';
 import { createBase64UI } from './base64.js';
 import { initialState, reduceState } from './state.js';
 
-// Upper bound on one scan's main-thread work. jsQR is synchronous, so without
-// a ceiling a page full of large images could freeze the tab for minutes.
+// Budget for one scan's main-thread work. Without a ceiling, a page full of
+// large images could freeze the tab for minutes.
+//
+// This is a checkpoint budget, not a hard deadline: jsQR runs synchronously and
+// cannot be interrupted once started, so the budget is tested between
+// candidates and between decode strategies. A candidate that starts just under
+// the limit still runs to completion - worst case measured at the pixel gate
+// (1.2M px, no code, attemptBoth) is ~870ms, putting the real ceiling near
+// 3.4s. Bounding it tighter would need a Worker.
 const SCAN_BUDGET_MS = 2500;
 
 function start() {
