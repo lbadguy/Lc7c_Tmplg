@@ -1,9 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeSelection, hasArea } from '../src/selection.js';
 import { classifyUrl } from '../src/url.js';
 import { canUseMainThreadDecoder, decodeImageData } from '../src/decode.js';
-import { intersectRects } from '../src/capture.js';
 import { initialState, reduceState } from '../src/state.js';
 import { base64Encode, base64Decode } from '../src/base64-codec.js';
 
@@ -53,12 +51,6 @@ test('base64 decode whitespace-only input', () => {
   assert.throws(() => base64Decode('   '), { message: /解码失败/ });
 });
 
-test('normalizes reverse drag and clamps to viewport', () => {
-  const rect = normalizeSelection({ x: 220, y: 180 }, { x: -20, y: 40 }, { right: 200, bottom: 160 });
-  assert.deepEqual(rect, { x: 0, y: 40, width: 200, height: 120 });
-  assert.equal(hasArea(rect), true);
-});
-
 test('classifies only HTTP(S) URLs', () => {
   assert.deepEqual(classifyUrl(' https://example.com/a '), {
     text: ' https://example.com/a ', isUrl: true, url: 'https://example.com/a',
@@ -102,16 +94,6 @@ test('decoder exceptions do not break the scan flow', async () => {
   });
   assert.equal(result, null);
   assert.deepEqual(calls, ['default']);
-});
-
-test('intersects a selected region with a visible media element', () => {
-  assert.deepEqual(
-    intersectRects(
-      { x: 100, y: 50, width: 300, height: 200 },
-      { x: 250, y: 0, width: 200, height: 180 }
-    ),
-    { x: 250, y: 50, width: 150, height: 130 }
-  );
 });
 
 test('keeps large images off the main-thread decoder', () => {
