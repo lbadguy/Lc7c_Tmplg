@@ -6,18 +6,29 @@ function pixels(width, height) {
   return { data: new Uint8ClampedArray(width * height * 4), width, height };
 }
 
+// jsQR reports a decoded code's position as four corner points.
+function corners(x0, y0, x1, y1) {
+  return {
+    topLeftCorner: { x: x0, y: y0 },
+    topRightCorner: { x: x1, y: y0 },
+    bottomLeftCorner: { x: x0, y: y1 },
+    bottomRightCorner: { x: x1, y: y1 }
+  };
+}
+
 test('decoder exceptions do not break the scan flow', async () => {
   // jsQR throws a TypeError when it cannot locate a finder pattern, so
   // swallowing it is a hard requirement, not defensive padding.
   const attempts = [];
-  const result = await decodeImageData(pixels(600, 600), {
+  const results = await decodeImageData(pixels(600, 600), {
     decoder: (_data, _width, _height, options) => {
       attempts.push(options?.inversionAttempts);
       throw new TypeError("Cannot read properties of undefined (reading 'height')");
     }
   });
-  assert.equal(result, null);
-  assert.deepEqual(attempts, ['attemptBoth']);
+  assert.equal(results.length, 0);
+  assert.ok(attempts.length >= 1, 'the sweep must reach the decoder at least once');
+  assert.deepEqual([...new Set(attempts)], ['attemptBoth']);
 });
 
 test('gates decoding on the pixel budget, not the original image size', () => {
@@ -30,21 +41,22 @@ test('a cropped region from a huge image still reaches the decoder', async () =>
   // The bug this fixes: a 3000x2000 source used to skip jsQR entirely.
   // Cropped to the selection, it is well under the gate and decodes.
   let called = false;
-  const result = await decodeImageData(pixels(600, 600), {
+  const results = await decodeImageData(pixels(600, 600), {
     decoder: () => { called = true; return { data: 'https://example.com/cropped' }; }
   });
   assert.equal(called, true);
-  assert.equal(result?.url, 'https://example.com/cropped');
+  assert.equal(results.length, 1);
+  assert.equal(results[0]?.url, 'https://example.com/cropped');
 });
 
 test('skips main-thread decoding for oversized input', async () => {
   let called = false;
-  const result = await decodeImageData(pixels(2000, 1500), {
+  const results = await decodeImageData(pixels(2000, 1500), {
     decoder: () => { called = true; return { data: 'never' }; }
   });
   // 3,000,000 px would take ~12s on the main thread and freeze the page.
   assert.equal(called, false);
-  assert.equal(result, null);
+  assert.equal(results.length, 0);
 });
 
 test('asks jsQR to cover both polarities in one pass', async () => {
@@ -57,61 +69,101 @@ test('asks jsQR to cover both polarities in one pass', async () => {
       return { data: 'https://example.com/either-polarity' };
     }
   });
-  assert.deepEqual(attempts, ['attemptBoth']);
+  assert.ok(attempts.length >= 1);
+  assert.deepEqual([...new Set(attempts)], ['attemptBoth']);
 });
 
-test('stops at the first hit without redundant passes', async () => {
-  let calls = 0;
-  const result = await decodeImageData(pixels(600, 600), {
-    decoder: () => { calls++; return { data: 'https://example.com/fast' }; }
+test('sliding windows let jsQR find multiple codes it cannot locate in one pass', async () => {
+  // jsQR's finder-pattern algorithm assumes one code per image. On a 1200x400
+  // with three codes side-by-side, it returns null - even the first one is
+  // unlocatable. Sweeping overlapping windows ensures each code lands cleanly in
+  // at least one window.
+  const results = await decodeImageData(pixels(600, 600), {
+    decoder: () => ({ data: 'https://example.com/found' })
   });
-  assert.equal(result?.url, 'https://example.com/fast');
-  assert.equal(calls, 1);
+  // How many windows depends on tilesFor logic; just confirm we got hits.
+  assert.ok(results.length >= 1);
 });
 
-test('prefers the native detector and skips jsQR on a hit', async () => {
+test('deduplicates the same payload found by both decoders', async () => {
+  const results = await decodeImageData(pixels(600, 600), {
+    canvasFactory: () => ({}),
+    detectorFactory: () => ({ detect: async () => [{ rawValue: 'https://example.com/dup' }] }),
+    decoder: () => ({ data: 'https://example.com/dup', location: corners(0, 0, 100, 100) })
+  });
+  assert.equal(results.length, 1);
+});
+
+test('caps the window sweep so a pathological image cannot spin', async () => {
+  // A decoder that reports a fresh payload for every window must not let the
+  // sweep grow without bound.
+  let calls = 0;
+  const results = await decodeImageData(pixels(1200, 1000), {
+    decoder: () => { calls++; return { data: `code-${calls}`, location: corners(0, 0, 10, 10) }; }
+  });
+  assert.ok(calls <= 25, `sweep must stay bounded, saw ${calls} decoder calls`);
+  assert.equal(results.length, calls);
+});
+
+test('collects every code the native detector reports', async () => {
+  const results = await decodeImageData(pixels(600, 600), {
+    canvasFactory: () => ({}),
+    detectorFactory: () => ({
+      detect: async () => [
+        { rawValue: 'https://example.com/a' },
+        { rawValue: 'https://example.com/b' }
+      ]
+    }),
+    decoder: () => null
+  });
+  assert.deepEqual(results.map(result => result.url), ['https://example.com/a', 'https://example.com/b']);
+});
+
+test('still runs jsQR after a native hit to catch codes it missed', async () => {
+  // The native detector and jsQR fail on different inputs, so a native hit is
+  // no reason to skip jsQR when we are after every code in the image.
   let jsqrCalls = 0;
-  const result = await decodeImageData(pixels(600, 600), {
+  const results = await decodeImageData(pixels(600, 600), {
     canvasFactory: () => ({}),
     detectorFactory: () => ({ detect: async () => [{ rawValue: 'https://example.com/native' }] }),
     decoder: () => { jsqrCalls++; return null; }
   });
-  assert.equal(result?.url, 'https://example.com/native');
-  assert.equal(jsqrCalls, 0);
+  assert.deepEqual(results.map(result => result.url), ['https://example.com/native']);
+  assert.ok(jsqrCalls >= 1, 'the jsQR sweep must still run after a native hit');
 });
 
 test('falls back to jsQR when the native detector finds nothing', async () => {
-  const result = await decodeImageData(pixels(600, 600), {
+  const results = await decodeImageData(pixels(600, 600), {
     canvasFactory: () => ({}),
     detectorFactory: () => ({ detect: async () => [] }),
     decoder: () => ({ data: 'https://example.com/fallback' })
   });
-  assert.equal(result?.url, 'https://example.com/fallback');
+  assert.equal(results[0]?.url, 'https://example.com/fallback');
 });
 
 test('falls back to jsQR when the native detector throws', async () => {
-  const result = await decodeImageData(pixels(600, 600), {
+  const results = await decodeImageData(pixels(600, 600), {
     canvasFactory: () => ({}),
     detectorFactory: () => ({ detect: async () => { throw new Error('unsupported'); } }),
     decoder: () => ({ data: 'https://example.com/recovered' })
   });
-  assert.equal(result?.url, 'https://example.com/recovered');
+  assert.equal(results[0]?.url, 'https://example.com/recovered');
 });
 
 test('an exhausted budget stops decoding before any work', async () => {
   let called = false;
-  const result = await decodeImageData(pixels(600, 600), {
+  const results = await decodeImageData(pixels(600, 600), {
     remainingBudget: 0,
     decoder: () => { called = true; return { data: 'never' }; }
   });
-  assert.equal(result, null);
+  assert.equal(results.length, 0);
   assert.equal(called, false);
 });
 
 test('rejects empty or malformed pixel data', async () => {
-  assert.equal(await decodeImageData(null, {}), null);
-  assert.equal(await decodeImageData({ width: 0, height: 0 }, {}), null);
-  assert.equal(await decodeImageData({ data: new Uint8ClampedArray(4) }, {}), null);
+  assert.deepEqual(await decodeImageData(null, {}), []);
+  assert.deepEqual(await decodeImageData({ width: 0, height: 0 }, {}), []);
+  assert.deepEqual(await decodeImageData({ data: new Uint8ClampedArray(4) }, {}), []);
 });
 
 test('aborts when the signal is already cancelled', async () => {

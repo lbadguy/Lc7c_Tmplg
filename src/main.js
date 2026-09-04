@@ -11,9 +11,13 @@ import { initialState, reduceState } from './state.js';
 // cannot be interrupted once started, so the budget is tested between
 // candidates and between decode strategies. A candidate that starts just under
 // the limit still runs to completion - worst case measured at the pixel gate
-// (1.2M px, no code, attemptBoth) is ~870ms, putting the real ceiling near
-// 3.4s. Bounding it tighter would need a Worker.
-const SCAN_BUDGET_MS = 2500;
+// (1.2M px, no code, attemptBoth) is ~870ms.
+//
+// "Scan current page" gets a longer budget because the user expects all codes
+// in the viewport to be found. "Select region" keeps the shorter budget since
+// it usually targets a single code.
+const SCAN_BUDGET_SELECTION_MS = 2500;
+const SCAN_BUDGET_VIEWPORT_MS = 5000;
 
 function start() {
   if (!document.body || document.getElementById('qr-scanner-root')) return;
@@ -25,22 +29,24 @@ function start() {
     controller?.abort(); controller = null; ui.cancelSelection();
     if (state.phase === 'scanning') setState({ type: 'scan-cancel' });
   };
-  const runScan = async rect => {
+  const runScan = async (rect, budgetMs = SCAN_BUDGET_SELECTION_MS) => {
     cancel();
     controller = new AbortController();
     setState({ type: 'scan-start' });
     const stats = {};
     const startedAt = Date.now();
-    const remaining = () => SCAN_BUDGET_MS - (Date.now() - startedAt);
+    const remaining = () => budgetMs - (Date.now() - startedAt);
     try {
-      let result = null;
+      const results = [];
       let timedOut = false;
       for await (const pixels of captureVisiblePage({ rect, signal: controller.signal, stats })) {
         if (remaining() <= 0) { timedOut = true; break; }
-        result = await decodeImageData(pixels, { signal: controller.signal, remainingBudget: remaining() });
-        if (result) break;
+        const found = await decodeImageData(pixels, { signal: controller.signal, remainingBudget: remaining() });
+        if (found?.length) results.push(...found);
       }
-      if (result) setState({ type: 'scan-success', result });
+      // Partial results beat a bare timeout message: the user can act on what
+      // was found and re-scan a smaller region for the rest.
+      if (results.length) setState({ type: 'scan-success', results, partial: timedOut });
       else if (timedOut) setState({ type: 'scan-timeout' });
       else if (!stats.candidates) setState({ type: 'scan-no-media' });
       else if (!stats.read) setState({ type: 'scan-unreadable' });
@@ -53,16 +59,16 @@ function start() {
     }
   };
   ui = createScannerUI({
-    onCurrent: () => runScan({ x: 0, y: 0, width: innerWidth, height: innerHeight }),
-    onSelect: async () => { const rect = await ui.selectRegion(); if (rect) runScan(rect); else setState({ type: 'scan-error', message: '未选择有效区域。' }); },
+    onCurrent: () => runScan({ x: 0, y: 0, width: innerWidth, height: innerHeight }, SCAN_BUDGET_VIEWPORT_MS),
+    onSelect: async () => { const rect = await ui.selectRegion(); if (rect) runScan(rect, SCAN_BUDGET_SELECTION_MS); else setState({ type: 'scan-error', message: '未选择有效区域。' }); },
     onCancel: cancel,
-    onCopy: async () => {
-      const text = ui.result?.text; if (!text) return;
-      try { await navigator.clipboard.writeText(text); ui.setState({ ...state, message: '已复制二维码内容。' }); }
-      catch { const area = document.createElement('textarea'); area.value = text; area.style.position = 'fixed'; area.style.opacity = '0'; document.body.append(area); area.select(); document.execCommand('copy'); area.remove(); ui.setState({ ...state, message: '已复制二维码内容。' }); }
+    onCopy: async (text) => {
+      if (!text) return;
+      try { await navigator.clipboard.writeText(text); ui.showNotice('已复制二维码内容。'); }
+      catch { const area = document.createElement('textarea'); area.value = text; area.style.position = 'fixed'; area.style.opacity = '0'; document.body.append(area); area.select(); document.execCommand('copy'); area.remove(); ui.showNotice('已复制二维码内容。'); }
     },
-    onOpen: () => {
-      const result = ui.result; if (!result?.openUrl) return;
+    onOpen: (result) => {
+      if (!result?.openUrl) return;
       if (result.openMode === 'web') {
         const popup = window.open(result.openUrl, '_blank', 'noopener,noreferrer');
         if (!popup) ui.showNotice('浏览器阻止了新标签页，请允许弹窗后重试。');

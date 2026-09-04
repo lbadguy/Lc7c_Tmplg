@@ -145,13 +145,36 @@ test('light-on-dark codes decode through the chain', async t => {
   // TypeError when it cannot locate any finder pattern, and swallowing that
   // is exactly what the decode chain is responsible for.
   const decoded = await decodeImageData({ data: image, width, height });
-  assert.equal(decoded?.raw, payload, 'the chain must recover a light-on-dark code');
+  assert.equal(decoded.length, 1, 'the chain must find the light-on-dark code');
+  assert.equal(decoded[0]?.raw, payload, 'the chain must recover a light-on-dark code');
 
   // Documents why the chain uses attemptBoth: the cheaper single pass misses
   // this code, and onlyInvert throws rather than decoding it.
   const plain = jsQR(image, width, height, { inversionAttempts: 'dontInvert' });
   assert.equal(plain, null);
   assert.throws(() => jsQR(image, width, height, { inversionAttempts: 'onlyInvert' }));
+});
+
+test('multiple codes in one image are all decoded', async t => {
+  const payloads = [
+    'https://example.com/first',
+    'https://example.com/second',
+    'https://example.com/third'
+  ];
+  const modules = await Promise.all(payloads.map(makeQrModules));
+  if (modules.some(m => !m)) return t.skip('optional qrcode encoder not installed');
+
+  const width = 1200;
+  const height = 400;
+  const image = white(width, height);
+  // Three codes side-by-side in the same image.
+  const side0 = paintQr(image, width, modules[0], 50, 50, 6, 4);
+  const side1 = paintQr(image, width, modules[1], 450, 50, 6, 4);
+  const side2 = paintQr(image, width, modules[2], 850, 50, 6, 4);
+
+  const decoded = await decodeImageData({ data: image, width, height });
+  const texts = decoded.map(result => result.raw).sort();
+  assert.deepEqual(texts, payloads.sort(), 'all three codes must be found');
 });
 
 test('the decode chain survives jsQR throwing on unlocatable input', async () => {
@@ -166,5 +189,5 @@ test('the decode chain survives jsQR throwing on unlocatable input', async () =>
     noise[i + 2] = value;
     noise[i + 3] = 255;
   }
-  assert.equal(await decodeImageData({ data: noise, width, height }), null);
+  assert.deepEqual(await decodeImageData({ data: noise, width, height }), []);
 });

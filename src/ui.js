@@ -9,6 +9,16 @@ const STYLE = `
 .qr-message { margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .qr-notice { margin: 8px 0; color: #8a5200; line-height: 1.5; white-space: pre-wrap; }
 .qr-notice:empty { display: none; }
+.qr-results { margin: 8px 0 12px; display: flex; flex-direction: column; gap: 10px; }
+.qr-results:empty { display: none; }
+.qr-result-card { border: 1px solid #d7e3e8; border-radius: 6px; padding: 10px; background: #f7fafb; }
+.qr-result-text { margin: 0 0 8px; word-break: break-all; font-size: 13px; line-height: 1.4; }
+.qr-result-notice { margin: 0 0 8px; color: #8a5200; font-size: 12px; line-height: 1.4; }
+.qr-result-notice:empty { display: none; }
+.qr-result-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.qr-result-actions button { border: 1px solid #9eb5bf; border-radius: 4px; padding: 5px 8px; color: #16303b; background: #fff; font: inherit; font-size: 12px; cursor: pointer; }
+.qr-result-actions button:hover { background: #e8f2f5; }
+.qr-result-actions button[hidden] { display: none; }
 .qr-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .qr-actions button { border: 1px solid #9eb5bf; border-radius: 6px; padding: 7px 10px; color: #16303b; background: #f7fafb; font: inherit; cursor: pointer; }
 .qr-actions button:hover { background: #e8f2f5; }
@@ -31,14 +41,13 @@ export function createScannerUI({ onCurrent, onSelect, onCancel, onCopy, onOpen 
   const close = document.createElement('button'); close.className = 'qr-close'; close.type = 'button'; close.textContent = '×'; close.title = '关闭'; close.setAttribute('aria-label', '关闭二维码扫描器');
   const message = document.createElement('div'); message.className = 'qr-message';
   const notice = document.createElement('div'); notice.className = 'qr-notice';
+  const results = document.createElement('div'); results.className = 'qr-results';
   const actions = document.createElement('div'); actions.className = 'qr-actions';
   const current = makeButton('扫描当前页', onCurrent);
   const select = makeButton('框选区域', onSelect);
   const cancel = makeButton('取消', onCancel); cancel.hidden = true;
-  const copy = makeButton('复制内容', onCopy); copy.hidden = true;
-  const open = makeButton('新标签打开', onOpen); open.hidden = true;
-  actions.append(current, select, cancel, copy, open);
-  panel.append(title, close, message, notice, actions);
+  actions.append(current, select, cancel);
+  panel.append(title, close, message, notice, results, actions);
   const mask = document.createElement('div'); mask.className = 'qr-mask'; mask.hidden = true; mask.tabIndex = 0; mask.setAttribute('aria-label', '框选二维码区域'); mask.style.pointerEvents = 'auto';
   const selection = document.createElement('div'); selection.className = 'qr-selection'; mask.append(selection);
   shadow.append(panel, mask);
@@ -47,7 +56,6 @@ export function createScannerUI({ onCurrent, onSelect, onCancel, onCopy, onOpen 
   let selectionPromise = null;
   let resolveSelection = null;
   let start = null;
-  let latestResult = null;
 
   close.addEventListener('click', () => { panel.hidden = true; });
   mask.addEventListener('pointerdown', event => {
@@ -81,19 +89,39 @@ export function createScannerUI({ onCurrent, onSelect, onCancel, onCopy, onOpen 
   }
 
   return {
-    get result() { return latestResult; },
     showPanel() { panel.hidden = false; },
     showNotice(text) { notice.textContent = text; panel.hidden = false; },
     setState(state) {
       panel.hidden = false; message.textContent = state.message; notice.textContent = '';
       const busy = state.phase === 'scanning';
       current.disabled = busy; select.disabled = busy; cancel.hidden = !busy;
-      latestResult = state.result;
-      copy.hidden = !state.result; open.hidden = !(state.result?.openUrl);
-      if (state.result) {
-        message.textContent = state.result.text;
-        notice.textContent = state.result.notice || '';
-        open.textContent = state.result.openLabel || '打开';
+      results.innerHTML = '';
+      if (state.results?.length) {
+        const prefix = state.partial ? '扫描超时，已找到 ' : '识别到 ';
+        message.textContent = `${prefix}${state.results.length} 个二维码:`;
+        if (state.partial) {
+          notice.textContent = '部分二维码未能在时间内解码。可尝试框选更小区域重新扫描。';
+        }
+        state.results.forEach(result => {
+          const card = document.createElement('div');
+          card.className = 'qr-result-card';
+          const text = document.createElement('p');
+          text.className = 'qr-result-text';
+          text.textContent = result.text;
+          const resultNotice = document.createElement('p');
+          resultNotice.className = 'qr-result-notice';
+          resultNotice.textContent = result.notice || '';
+          const resultActions = document.createElement('div');
+          resultActions.className = 'qr-result-actions';
+          const copyBtn = makeButton('复制', () => onCopy(result.text));
+          resultActions.append(copyBtn);
+          if (result.openUrl) {
+            const openBtn = makeButton(result.openLabel || '打开', () => onOpen(result));
+            resultActions.append(openBtn);
+          }
+          card.append(text, resultNotice, resultActions);
+          results.append(card);
+        });
       }
     },
     selectRegion() {

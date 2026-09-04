@@ -15,8 +15,8 @@ export function canUseMainThreadDecoder(imageData) {
   return imageData.width * imageData.height <= MAX_MAIN_THREAD_PIXELS;
 }
 
-function toResult(text) {
-  return { ...classifyUrl(text), raw: text };
+function toResult(text, location = null) {
+  return { ...classifyUrl(text), raw: text, location };
 }
 
 /**
@@ -27,31 +27,91 @@ function toResult(text) {
 async function tryNativeDetector(imageData, { detectorFactory, canvasFactory }) {
   const factory = detectorFactory
     ?? (typeof BarcodeDetector !== 'undefined' ? () => new BarcodeDetector({ formats: ['qr_code'] }) : null);
-  if (!factory) return null;
+  if (!factory) return [];
   const canvas = canvasFactory(imageData);
-  if (!canvas) return null;
+  if (!canvas) return [];
   try {
     const detector = factory();
     const codes = await detector.detect(canvas);
-    const value = codes?.find(code => code?.rawValue)?.rawValue;
-    return value ? toResult(value) : null;
+    // The native detector reports every code in one pass, which is exactly
+    // what we want here - no masking loop needed.
+    return (codes ?? [])
+      .filter(code => code?.rawValue)
+      .map(code => toResult(code.rawValue, boundingBoxOf(code)));
   } catch {
     // Unsupported format, detached canvas, or a detector that throws on
     // this input. jsQR still gets its turn.
-    return null;
+    return [];
   }
+}
+
+function boundingBoxOf(code) {
+  const box = code?.boundingBox;
+  if (box && Number.isFinite(box.x) && Number.isFinite(box.y)) {
+    return { x: box.x, y: box.y, width: box.width, height: box.height };
+  }
+  const points = code?.cornerPoints;
+  if (!Array.isArray(points) || !points.length) return null;
+  const xs = points.map(point => point.x);
+  const ys = points.map(point => point.y);
+  const x = Math.min(...xs);
+  const y = Math.min(...ys);
+  return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
+}
+
+const MIN_WINDOW_SIDE = 160;
+const MAX_WINDOWS = 24;
+
+function* tilesFor(width, height) {
+  const shortEdge = Math.min(width, height);
+  const side = Math.max(MIN_WINDOW_SIDE, Math.round(shortEdge * 0.9));
+  if (side >= width && side >= height) return;
+  const step = Math.max(1, Math.round(side / 2));
+  const xs = offsets(width, side, step);
+  const ys = offsets(height, side, step);
+  let emitted = 0;
+  for (const sy of ys) {
+    for (const sx of xs) {
+      if (++emitted > MAX_WINDOWS) return;
+      yield { sx, sy, sw: Math.min(side, width - sx), sh: Math.min(side, height - sy) };
+    }
+  }
+}
+
+function offsets(total, side, step) {
+  if (side >= total) return [0];
+  const list = [];
+  for (let start = 0; start + side < total; start += step) list.push(start);
+  list.push(total - side);
+  return list;
+}
+
+function extractTile(imageData, { sx, sy, sw, sh }) {
+  const out = new Uint8ClampedArray(sw * sh * 4);
+  for (let y = 0; y < sh; y++) {
+    for (let x = 0; x < sw; x++) {
+      const to = (y * sw + x) * 4;
+      const from = ((sy + y) * imageData.width + (sx + x)) * 4;
+      out[to] = imageData.data[from];
+      out[to + 1] = imageData.data[from + 1];
+      out[to + 2] = imageData.data[from + 2];
+      out[to + 3] = imageData.data[from + 3];
+    }
+  }
+  return { data: out, width: sw, height: sh };
 }
 
 function runJsQR(decoder, imageData, inversionAttempts) {
   try {
     const result = decoder(imageData.data, imageData.width, imageData.height, { inversionAttempts });
-    return result?.data ? toResult(result.data) : null;
+    return result?.data ? toResult(result.data, result.location) : null;
   } catch {
     // jsQR throws on some malformed inputs; treat it as a miss so the
     // caller can try the next strategy.
     return null;
   }
 }
+
 
 function upscaleImageData(imageData, factor, canvasFactory) {
   if (factor <= 1) return null;
@@ -81,21 +141,26 @@ function imageDataToCanvas(imageData) {
   return canvas;
 }
 
+// BarcodeDetector reports all codes in one pass; jsQR cannot reliably locate
+// codes when multiple are present in the same image, so the masking loop is
+// omitted from the jsQR path.
+const MAX_CODES_PER_IMAGE = 10;
+
 /**
- * Try progressively more expensive strategies on one candidate's pixels,
- * stopping at the first hit and respecting the caller's time budget.
+ * Find QR codes in one candidate's pixels, respecting the caller's time budget.
+ * Returns an array, empty when nothing decodes.
  *
- * 1. native BarcodeDetector - different algorithm, usually fastest
- * 2. jsQR with 'attemptBoth' - covers dark-on-light and light-on-dark
+ * 1. native BarcodeDetector - reports all codes in a single call
+ * 2. jsQR with 'attemptBoth' - finds one code (multiple codes in the same image
+ *    confuse its locator, so no masking loop)
  * 3. jsQR upscaled - rescues codes too small for reliable binarization
  *
- * 'attemptBoth' rather than a cheap 'dontInvert' pass followed by
- * 'onlyInvert': measured on this jsQR build, 'onlyInvert' throws on inverted
- * input instead of decoding it, so splitting the passes silently drops
- * light-on-dark support. The feared cost does not materialize either - on a
- * code that decodes, 'attemptBoth' returns on the first pass (~10ms at
- * 400x400, same as 'dontInvert'). Only unlocatable input pays for two passes,
- * and that case is already bounded by the pixel gate and the time budget.
+ * 'attemptBoth' rather than separate 'dontInvert'/'onlyInvert': measured on this
+ * jsQR build, 'onlyInvert' throws on inverted input instead of decoding it, so
+ * splitting silently drops light-on-dark support. The feared cost does not
+ * materialize - on a code that decodes, 'attemptBoth' returns on the first pass
+ * (~10ms at 400x400, same as 'dontInvert'). Only unlocatable input pays for two
+ * passes, bounded by the pixel gate and the time budget.
  */
 export async function decodeImageData(imageData, {
   signal,
@@ -105,34 +170,60 @@ export async function decodeImageData(imageData, {
   detectorFactory
 } = {}) {
   throwIfAborted(signal);
-  if (!imageData?.data || !imageData.width || !imageData.height) return null;
-  if (remainingBudget <= 0) return null;
+  if (!imageData?.data || !imageData.width || !imageData.height) return [];
+  if (remainingBudget <= 0) return [];
 
   const startedAt = Date.now();
   const budgetLeft = () => remainingBudget - (Date.now() - startedAt);
 
-  const native = await tryNativeDetector(imageData, { detectorFactory, canvasFactory });
-  if (native) return native;
+  const found = [];
+  const seen = new Set();
+  const collect = result => {
+    if (!result || seen.has(result.raw)) return;
+    seen.add(result.raw);
+    found.push(result);
+  };
+
+  (await tryNativeDetector(imageData, { detectorFactory, canvasFactory })).forEach(collect);
 
   throwIfAborted(signal);
-  if (budgetLeft() <= 0) return null;
+  if (budgetLeft() <= 0) return found;
 
+  // Fast path: try the full image once. Hits when the candidate contains
+  // exactly one code (the common case), or when multiple codes happen to
+  // decode despite jsQR's single-code assumption.
   if (canUseMainThreadDecoder(imageData)) {
-    const direct = runJsQR(decoder, imageData, 'attemptBoth');
-    if (direct) return direct;
+    const hit = runJsQR(decoder, imageData, 'attemptBoth');
+    if (hit) collect(hit);
   }
 
   throwIfAborted(signal);
-  if (budgetLeft() <= 0) return null;
+  if (found.length || budgetLeft() <= 0) return found;
+
+  // Slow path: subdivide into overlapping windows so each code lands cleanly
+  // in at least one tile. Only runs when BarcodeDetector missed and the full
+  // image returned nothing - rare, but the regression test needs it.
+  if (canUseMainThreadDecoder(imageData)) {
+    for (const tile of tilesFor(imageData.width, imageData.height)) {
+      throwIfAborted(signal);
+      if (budgetLeft() <= 0) return found;
+      const tileData = extractTile(imageData, tile);
+      const hit = runJsQR(decoder, tileData, 'attemptBoth');
+      if (hit) collect(hit);
+    }
+  }
+
+  throwIfAborted(signal);
+  if (found.length || budgetLeft() <= 0) return found;
 
   const factor = upscaleFactor(imageData.width, imageData.height, MIN_DECODE_SIDE);
   if (factor > 1) {
     const enlarged = upscaleImageData(imageData, factor, canvasFactory);
     if (enlarged && canUseMainThreadDecoder(enlarged)) {
-      const scaled = runJsQR(decoder, enlarged, 'attemptBoth');
-      if (scaled) return scaled;
+      const hit = runJsQR(decoder, enlarged, 'attemptBoth');
+      if (hit) collect(hit);
     }
   }
 
-  return null;
+  return found;
 }
