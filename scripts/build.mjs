@@ -13,6 +13,10 @@ const metadata = `// ==UserScript==
 // @match        https://*/*
 // @run-at       document-idle
 // @grant        GM_registerMenuCommand
+// @grant        GM_unregisterMenuCommand
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_openInTab
 // @grant        GM_xmlhttpRequest
 // @connect      *
 // ==/UserScript==

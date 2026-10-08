@@ -27,7 +27,7 @@ const STYLE = `
 .qr-selection { position: absolute; border: 2px solid #f6c344; background: #f6c34433; pointer-events: none; }
 `;
 
-export function createScannerUI({ onCurrent, onSelect, onCancel, onCopy, onOpen }) {
+export function createScannerUI({ onCurrent, onSelect, onSystemTextCapture, onCancel, onCopy, onOpen }) {
   const host = document.createElement('div');
   host.id = 'qr-scanner-root';
   host.style.cssText = 'all:initial;position:fixed;inset:0;z-index:2147483647;pointer-events:none;';
@@ -45,8 +45,9 @@ export function createScannerUI({ onCurrent, onSelect, onCancel, onCopy, onOpen 
   const actions = document.createElement('div'); actions.className = 'qr-actions';
   const current = makeButton('扫描当前页', onCurrent);
   const select = makeButton('框选区域', onSelect);
+  const systemTextCapture = makeButton('系统文字识别', onSystemTextCapture);
   const cancel = makeButton('取消', onCancel); cancel.hidden = true;
-  actions.append(current, select, cancel);
+  actions.append(current, select, systemTextCapture, cancel);
   panel.append(title, close, message, notice, results, actions);
   const mask = document.createElement('div'); mask.className = 'qr-mask'; mask.hidden = true; mask.tabIndex = 0; mask.setAttribute('aria-label', '框选二维码区域'); mask.style.pointerEvents = 'auto';
   const selection = document.createElement('div'); selection.className = 'qr-selection'; mask.append(selection);
@@ -94,7 +95,7 @@ export function createScannerUI({ onCurrent, onSelect, onCancel, onCopy, onOpen 
     setState(state) {
       panel.hidden = false; message.textContent = state.message; notice.textContent = '';
       const busy = state.phase === 'scanning';
-      current.disabled = busy; select.disabled = busy; cancel.hidden = !busy;
+      current.disabled = busy; select.disabled = busy; systemTextCapture.disabled = busy; cancel.hidden = !busy;
       results.innerHTML = '';
       if (state.results?.length) {
         const prefix = state.partial ? '扫描超时，已找到 ' : '识别到 ';

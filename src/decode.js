@@ -61,10 +61,12 @@ function boundingBoxOf(code) {
 
 const MIN_WINDOW_SIDE = 160;
 const MAX_WINDOWS = 24;
+// Cap tile side so every tile stays under the main-thread pixel budget.
+const MAX_TILE_SIDE = Math.floor(Math.sqrt(MAX_MAIN_THREAD_PIXELS * 0.95));
 
 function* tilesFor(width, height) {
   const shortEdge = Math.min(width, height);
-  const side = Math.max(MIN_WINDOW_SIDE, Math.round(shortEdge * 0.9));
+  const side = Math.min(MAX_TILE_SIDE, Math.max(MIN_WINDOW_SIDE, Math.round(shortEdge * 0.9)));
   if (side >= width && side >= height) return;
   const step = Math.max(1, Math.round(side / 2));
   const xs = offsets(width, side, step);
@@ -130,6 +132,30 @@ function upscaleImageData(imageData, factor, canvasFactory) {
   return context.getImageData(0, 0, canvas.width, canvas.height);
 }
 
+/**
+ * Downscale an oversized ImageData to fit under MAX_MAIN_THREAD_PIXELS so jsQR
+ * can process it. Nearest-neighbor scaling (imageSmoothingEnabled=false) keeps
+ * QR module edges sharp.
+ */
+function rescaleForDecoder(imageData, canvasFactory) {
+  const pixels = imageData.width * imageData.height;
+  if (pixels <= MAX_MAIN_THREAD_PIXELS) return imageData;
+  if (typeof document === 'undefined') return null;
+  const scale = Math.sqrt(MAX_MAIN_THREAD_PIXELS * 0.95 / pixels);
+  const w = Math.max(1, Math.round(imageData.width * scale));
+  const h = Math.max(1, Math.round(imageData.height * scale));
+  const source = canvasFactory(imageData);
+  if (!source) return null;
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return null;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(source, 0, 0, w, h);
+  return ctx.getImageData(0, 0, w, h);
+}
+
 function imageDataToCanvas(imageData) {
   if (typeof document === 'undefined') return null;
   const canvas = document.createElement('canvas');
@@ -189,28 +215,32 @@ export async function decodeImageData(imageData, {
   throwIfAborted(signal);
   if (budgetLeft() <= 0) return found;
 
-  // Fast path: try the full image once. Hits when the candidate contains
-  // exactly one code (the common case), or when multiple codes happen to
-  // decode despite jsQR's single-code assumption.
-  if (canUseMainThreadDecoder(imageData)) {
-    const hit = runJsQR(decoder, imageData, 'attemptBoth');
-    if (hit) collect(hit);
+  // Fast path: try the full image once. When the image exceeds the pixel gate,
+  // downscale it so jsQR still gets a shot — the previous code silently skipped
+  // jsQR entirely for large images, which is why big WeChat QR codes failed.
+  {
+    const decodable = canUseMainThreadDecoder(imageData)
+      ? imageData
+      : rescaleForDecoder(imageData, canvasFactory);
+    if (decodable) {
+      const hit = runJsQR(decoder, decodable, 'attemptBoth');
+      if (hit) collect(hit);
+    }
   }
 
   throwIfAborted(signal);
   if (found.length || budgetLeft() <= 0) return found;
 
   // Slow path: subdivide into overlapping windows so each code lands cleanly
-  // in at least one tile. Only runs when BarcodeDetector missed and the full
-  // image returned nothing - rare, but the regression test needs it.
-  if (canUseMainThreadDecoder(imageData)) {
-    for (const tile of tilesFor(imageData.width, imageData.height)) {
-      throwIfAborted(signal);
-      if (budgetLeft() <= 0) return found;
-      const tileData = extractTile(imageData, tile);
-      const hit = runJsQR(decoder, tileData, 'attemptBoth');
-      if (hit) collect(hit);
-    }
+  // in at least one tile. Tile size is capped by MAX_TILE_SIDE so every tile
+  // fits the main-thread pixel budget — the previous gate on the FULL image
+  // size prevented tiling from ever running on the images that needed it most.
+  for (const tile of tilesFor(imageData.width, imageData.height)) {
+    throwIfAborted(signal);
+    if (budgetLeft() <= 0) return found;
+    const tileData = extractTile(imageData, tile);
+    const hit = runJsQR(decoder, tileData, 'attemptBoth');
+    if (hit) collect(hit);
   }
 
   throwIfAborted(signal);

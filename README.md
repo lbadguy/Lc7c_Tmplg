@@ -11,6 +11,8 @@ npm run build
 
 将 `dist/qr-scanner.user.js` 导入 Tampermonkey。脚本仅匹配 `http://` 和 `https://` 页面，不在网页中常驻按钮。使用时点击 Tampermonkey 图标，再点击脚本菜单中的 `QR Scanner`。
 
+在 `linux.do` 页面打开 Tampermonkey 菜单，可切换“Linux.do 帖子新标签页”。默认关闭；开启后，普通左键点击话题列表中的帖子标题会在前台新标签页打开。Ctrl/Shift/Alt/Command 点击、中键点击和帖子内跳转保持浏览器原有行为，设置会保存在 Tampermonkey 脚本存储中。
+
 ## 权限说明
 
 脚本声明了两项 Tampermonkey 权限，装机时会提示：
@@ -23,6 +25,8 @@ npm run build
 更新脚本后如果旧的“新建用户脚本”仍显示右下角按钮，请在 Tampermonkey 的“已安装脚本”中停用旧脚本，只保留 `QR Scanner (offline)`。新版本可能在安装时请求一次跨域图片读取权限，这是为了读取页面已经展示的图片，不是标签页共享权限。
 
 扫描结果可复制。普通 `http:` / `https:` 地址显示“新标签打开”；公众号 `weixin.qq.com/r/...` 链接显示“尝试唤起微信”并解释浏览器限制；官方微信小程序 Scheme 显示“在微信打开”。框选使用指针拖拽，空选区可取消并会显示提示。
+
+面板中的“系统文字识别”按钮会调用 Windows 的 `ms-screenclip:` 系统协议，打开系统截图工具的选区界面。它不是网页截图，也不是伪造 `PrtSc` 按键；完成选区后可在 Windows 截图工具中使用“文本操作”。如果浏览器拦截外部协议，请使用 `Win+Shift+S`，或在 Windows 中确认已安装截图工具。
 
 ## 识别流程
 

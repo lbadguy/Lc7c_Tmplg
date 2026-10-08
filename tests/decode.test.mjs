@@ -49,14 +49,26 @@ test('a cropped region from a huge image still reaches the decoder', async () =>
   assert.equal(results[0]?.url, 'https://example.com/cropped');
 });
 
-test('skips main-thread decoding for oversized input', async () => {
+test('downscales oversized input instead of skipping it', async () => {
   let called = false;
+  let receivedWidth, receivedHeight;
   const results = await decodeImageData(pixels(2000, 1500), {
-    decoder: () => { called = true; return { data: 'never' }; }
+    decoder: (data, w, h) => {
+      called = true;
+      receivedWidth = w;
+      receivedHeight = h;
+      return { data: 'https://example.com/downscaled' };
+    }
   });
-  // 3,000,000 px would take ~12s on the main thread and freeze the page.
-  assert.equal(called, false);
-  assert.equal(results.length, 0);
+  // Previously this skipped jsQR entirely for >1.2M px; now it downscales so
+  // the decoder still gets a chance — fixing large WeChat QR codes.
+  assert.equal(called, true);
+  assert.equal(results.length, 1);
+  // Verify the image was downscaled: original 2000x1500 = 3M px should be
+  // reduced to fit under the pixel budget.
+  assert.ok(receivedWidth < 2000, `expected width < 2000, got ${receivedWidth}`);
+  assert.ok(receivedHeight < 1500, `expected height < 1500, got ${receivedHeight}`);
+  assert.ok(receivedWidth * receivedHeight <= 1200000, 'downscaled pixel count should be under budget');
 });
 
 test('asks jsQR to cover both polarities in one pass', async () => {

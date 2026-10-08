@@ -18,9 +18,72 @@ import { initialState, reduceState } from './state.js';
 // it usually targets a single code.
 const SCAN_BUDGET_SELECTION_MS = 2500;
 const SCAN_BUDGET_VIEWPORT_MS = 5000;
+const LINUX_DO_NEW_TAB_KEY = 'linuxDoTopicLinksNewTab';
+
+function setupLinuxDoTopicNewTab() {
+  if (location.hostname !== 'linux.do') return;
+  if (typeof GM_registerMenuCommand !== 'function'
+    || typeof GM_getValue !== 'function'
+    || typeof GM_setValue !== 'function') return;
+
+  let menuCommandId = null;
+  const registerMenuCommand = () => {
+    if (menuCommandId !== null && typeof GM_unregisterMenuCommand === 'function') {
+      GM_unregisterMenuCommand(menuCommandId);
+    }
+    const enabled = GM_getValue(LINUX_DO_NEW_TAB_KEY, false) === true;
+    menuCommandId = GM_registerMenuCommand(
+      `Linux.do 帖子新标签页：${enabled ? '开启' : '关闭'}`,
+      () => {
+        GM_setValue(LINUX_DO_NEW_TAB_KEY, GM_getValue(LINUX_DO_NEW_TAB_KEY, false) !== true);
+        registerMenuCommand();
+      },
+      { autoClose: false }
+    );
+  };
+
+  document.addEventListener('click', event => {
+    if (!event.isTrusted || event.defaultPrevented || event.button !== 0
+      || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey
+      || GM_getValue(LINUX_DO_NEW_TAB_KEY, false) !== true) return;
+
+    const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+    const row = target?.closest('.topic-list-item, .latest-topic-list-item');
+    if (!row) return;
+
+    const clickedLink = target.closest('a[href]');
+    if (clickedLink && !clickedLink.matches('a.title[href]')) return;
+    if (target.closest('button, input, select, textarea, [role="button"], [contenteditable="true"], .bulk-select')) return;
+
+    const link = clickedLink || row.querySelector('a.title[href]');
+    if (!link) return;
+    if (link.target && link.target.toLowerCase() !== '_self') return;
+
+    let topicUrl;
+    try {
+      topicUrl = new URL(link.href, location.href);
+    } catch {
+      return;
+    }
+    if (topicUrl.origin !== location.origin
+      || !/^\/t\/(?:[^/]+\/)?\d+(?:\/\d+)?\/?$/.test(topicUrl.pathname)
+      || (topicUrl.pathname === location.pathname && topicUrl.hash)) return;
+
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (typeof GM_openInTab === 'function') {
+      GM_openInTab(topicUrl.href, { active: true, insert: true });
+    } else {
+      window.open(topicUrl.href, '_blank', 'noopener,noreferrer');
+    }
+  }, true);
+
+  registerMenuCommand();
+}
 
 function start() {
   if (!document.body || document.getElementById('qr-scanner-root')) return;
+  setupLinuxDoTopicNewTab();
   let state = initialState;
   let controller = null;
   let ui;
@@ -61,6 +124,20 @@ function start() {
   ui = createScannerUI({
     onCurrent: () => runScan({ x: 0, y: 0, width: innerWidth, height: innerHeight }, SCAN_BUDGET_VIEWPORT_MS),
     onSelect: async () => { const rect = await ui.selectRegion(); if (rect) runScan(rect, SCAN_BUDGET_SELECTION_MS); else setState({ type: 'scan-error', message: '未选择有效区域。' }); },
+    onSystemTextCapture: () => {
+      // Windows handles this URI by opening the Snipping Tool selection UI.
+      // A custom-protocol navigation is used instead of a synthetic key event:
+      // browsers do not let page scripts generate trusted OS keyboard input.
+      const link = document.createElement('a');
+      link.href = 'ms-screenclip:';
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.hidden = true;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      ui.showNotice('已打开 Windows 截图工具。选取区域后，可在工具栏中使用“文本操作”。');
+    },
     onCancel: cancel,
     onCopy: async (text) => {
       if (!text) return;
@@ -88,6 +165,11 @@ function start() {
     GM.registerMenuCommand('QR Scanner', () => ui.showPanel());
     GM.registerMenuCommand('Base64', () => base64UI.showPanel());
   } else {
+    ui.showPanel();
+  }
+
+  // 微信公众号文章页面自动弹出扫码器，省去手动点击菜单的步骤。
+  if (location.href.startsWith('https://mp.weixin.qq.com/')) {
     ui.showPanel();
   }
 }
